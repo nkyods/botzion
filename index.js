@@ -3,6 +3,16 @@ process.on("unhandledRejection", console.error);
 require("dotenv").config();
 const mongoose = require("mongoose");
 
+// ✅ AQUI (Express pro Koyeb)
+const express = require("express");
+const app = express();
+
+app.get("/", (req, res) => res.send("Bot online ✅"));
+app.listen(process.env.PORT || 8000, () => {
+  console.log("🌐 Web server ligado na porta", process.env.PORT || 8000);
+});
+// ✅ FIM DO EXPRESS
+
 const {
   Client,
   GatewayIntentBits,
@@ -706,3 +716,4 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(process.env.TOKEN);
+
