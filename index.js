@@ -1,8 +1,8 @@
 process.on("unhandledRejection", console.error);
 
 require("dotenv").config();
-console.log("TOKEN carregou?", process.env.DISCORD_TOKEN ? "SIM" : "NÃO");
-console.log("TOKEN começo:", (process.env.DISCORD_TOKEN || "").slice(0, 10));
+console.log("TOKEN carregou?", process.env.TOKEN ? "SIM" : "NÃO");
+console.log("TOKEN começo:", (process.env.TOKEN || "").slice(0, 10));
 
 const mongoose = require("mongoose");
 
@@ -779,4 +779,5 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // ✅ SEMPRE token no .env
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.TOKEN);
+
