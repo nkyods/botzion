@@ -375,7 +375,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!interaction.guild) return interaction.reply(eph("Esse comando só pode ser usado no servidor."));
 
       const membro = await interaction.guild.members.fetch(interaction.user.id);
-      const cargo = membro.roles.cache.find((r) => r.name === Mediador);
+      const cargo = membro.roles.cache.find((r) => r.name === NOME_CARGO_MEDIADOR);
       if (!cargo) return interaction.reply(eph("❌ Você não tem permissão para usar este comando."));
 
       const filaMeds = await getFilaMediadoresDB(interaction.guildId);
@@ -780,5 +780,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // ✅ SEMPRE token no .env
 client.login(process.env.TOKEN);
+
 
 
