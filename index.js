@@ -9,6 +9,10 @@ const mongoose = require("mongoose");
 // ✅ EXPRESS (Koyeb / Healthcheck)
 const express = require("express");
 const app = express();
+app.use((req, res, next) => {
+  console.log(`Ping recebido: ${req.method} ${req.url}`);
+  next();
+});
 app.get("/", (req, res) => res.send("Bot online ✅"));
 app.listen(process.env.PORT || 8000, () => {
   console.log("🌐 Web server ligado na porta", process.env.PORT || 8000);
@@ -780,6 +784,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // ✅ SEMPRE token no .env
 client.login(process.env.TOKEN);
+
 
 
 
