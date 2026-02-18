@@ -1,8 +1,8 @@
 process.on("unhandledRejection", console.error);
 
 require("dotenv").config();
-console.log("TOKEN carregou?", process.env.TOKEN ? "SIM" : "NÃO");
-console.log("TOKEN começo:", (process.env.TOKEN || "").slice(0, 10));
+console.log("TOKEN carregou?", process.env.DISCORD_TOKEN ? "SIM" : "NÃO");
+console.log("TOKEN começo:", (process.env.DISCORD_TOKEN || "").slice(0, 10));
 
 const mongoose = require("mongoose");
 
@@ -83,7 +83,7 @@ const PartidaSchema = new mongoose.Schema(
     channelId: { type: String, unique: true },
     jogadores: { type: [String], default: [] },
     mediador: { type: String, required: true },
-    valor: { type: Number, required: true },
+    valorCentavos: { type: Number, required: true },
     total: { type: Number, required: true },
     status: { type: String, default: "confirmacao" }, // confirmacao | em_andamento | finalizada
     confirmados: { type: [String], default: [] }, // ✅ mantém após restart
@@ -111,7 +111,7 @@ const FilaAPSchema = new mongoose.Schema(
     channelId: { type: String, index: true },
     messageId: { type: String, unique: true },
     formato: { type: String, required: true },
-    valor: { type: Number, required: true },
+    valorCentavos: { type: Number, required: true },
     jogadores: { type: [String], default: [] },
   },
   { timestamps: true }
@@ -161,13 +161,14 @@ async function shiftMediadorDB(guildId) {
   return primeiro || null;
 }
 
-async function salvarPartidaDB({ guildId, channelId, jogadores, mediador, valor, total, status }) {
+async function salvarPartidaDB({ guildId, channelId, jogadores, mediador, valorCentavos, totalCentavos, status }) {
   await Partida.findOneAndUpdate(
     { channelId },
-    { guildId, channelId, jogadores, mediador, valor, total, status, confirmados: [] },
+    { guildId, channelId, jogadores, mediador, valorCentavos, total: totalCentavos, status, confirmados: [] },
     { upsert: true, new: true }
   );
 }
+
 async function getPartidaDB(channelId) {
   return await Partida.findOne({ channelId });
 }
@@ -184,8 +185,8 @@ async function getPixDB(guildId, userId) {
 }
 
 // FILA AP helpers
-async function criarFilaAPDB({ guildId, channelId, messageId, formato, valor }) {
-  await FilaAP.create({ guildId, channelId, messageId, formato, valor, jogadores: [] });
+async function criarFilaAPDB({ guildId, channelId, messageId, formato, valorCentavos }) {
+  await FilaAP.create({ guildId, channelId, messageId, formato, valorCentavos, jogadores: [] });
 }
 async function getFilaAPDBByMessageId(messageId) {
   return await FilaAP.findOne({ messageId });
@@ -199,6 +200,21 @@ async function removeJogadorFilaAPDB(messageId, userId) {
 async function resetJogadoresFilaAPDB(messageId) {
   return await FilaAP.findOneAndUpdate({ messageId }, { $set: { jogadores: [] } }, { new: true });
 }
+function formatBRLFromCentavos(centavos) {
+  return (centavos / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+function eph(content) {
+  return { content, flags: MessageFlags.Ephemeral };
+}
+async function lockCategoryForStaff(category, guild, allowedRoleIds = []) {
+  await category.permissionOverwrites.set([
+    { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] }, // everyone não vê
+    ...allowedRoleIds.map(id => ({ id, allow: [PermissionsBitField.Flags.ViewChannel] })),
+  ]);
+}
+
+
+
 
 // ============================
 // DISCORD CLIENT
@@ -213,43 +229,230 @@ client.on("error", console.error);
 const NOME_CARGO_MEDIADOR = "Mediador"; // nome EXATO do cargo
 
 // ✅ cache em memória só pra performance (mas estado real fica no DB)
-const filasCache = new Map(); // messageId -> { formato, valor }
+const filasCache = new Map(); // messageId -> { formato, valorCentavos }
 
 // ============================
 // HELPERS (EMBEDS)
 // ============================
-function embedFilaAP({ formato, valor, jogadores }) {
+function embedFilaAP({ formato, valorCentavos, jogadores }) {
   const lista =
     jogadores.length > 0 ? jogadores.map((id) => `<@${id}>`).join(" | ") : "Nenhum jogador na fila.";
 
   return new EmbedBuilder()
-    .setTitle("👑 JOGUE NA ORG ALFA!")
-    .setDescription(`🎮 **Formato**\n${formato}\n\n💰 **Valor**\nR$ ${valor},00\n\n👥 **Jogadores**\n${lista}`)
+    .setTitle("👑 JOGUE NA ORG ZION!")
+    .setDescription(
+      `🎮 **Formato**\n${formato}\n\n` +
+      `💰 **Valor**\n${formatBRLFromCentavos(valorCentavos)}\n\n` +
+      `👥 **Jogadores**\n${lista}`
+    )
     .setColor("#1e90ff");
 }
 
-function componentsFilaAP({ valor, formato }) {
+
+function componentsFilaAP({ valorCentavos, formato }) {
   const gelNormal = new ButtonBuilder()
-    .setCustomId(`normal_${valor}_${formato}`)
+    .setCustomId(`normal_${valorCentavos}_${formato}`)
     .setLabel("🧊 Gel Normal")
     .setStyle(ButtonStyle.Primary);
 
   const gelInfinito = new ButtonBuilder()
-    .setCustomId(`infinito_${valor}_${formato}`)
+    .setCustomId(`infinito_${valorCentavos}_${formato}`)
     .setLabel("🧊 Gel Infinito")
     .setStyle(ButtonStyle.Secondary);
 
   const sair = new ButtonBuilder()
-    .setCustomId(`sair_${valor}_${formato}`)
+    .setCustomId(`sair_${valorCentavos}_${formato}`)
     .setLabel("❌ Sair da Fila")
     .setStyle(ButtonStyle.Danger);
 
   return [new ActionRowBuilder().addComponents(gelNormal, gelInfinito, sair)];
 }
 
-function eph(content) {
-  return { content, flags: MessageFlags.Ephemeral };
+const VALORES_PADRAO_CENTAVOS = [
+  20000, // 200,00
+  15000, // 150,00
+  10000, // 100,00
+  5000,  // 50,00
+  2000,  // 20,00
+  1000,  // 10,00
+  500,   // 5,00
+  200,   // 2,00
+  100,   // 1,00
+  50,    // 0,50
+];
+
+async function postarFilasPadraoNoCanal({ guildId, channel, formato }) {
+  for (const valorCentavos of VALORES_PADRAO_CENTAVOS) {
+    const embed = embedFilaAP({ formato, valorCentavos, jogadores: [] });
+
+    const msg = await channel.send({
+      embeds: [embed],
+      components: componentsFilaAP({ valorCentavos, formato }),
+    });
+
+    await criarFilaAPDB({
+      guildId,
+      channelId: channel.id,
+      messageId: msg.id,
+      formato,
+      valorCentavos,
+    });
+
+    filasCache.set(msg.id, { formato, valorCentavos });
+  }
 }
+
+async function createCategory(guild, name) {
+  return guild.channels.create({ name, type: ChannelType.GuildCategory });
+}
+async function createText(guild, name, parentId) {
+  return guild.channels.create({ name, type: ChannelType.GuildText, parent: parentId });
+}
+async function createVoice(guild, name, parentId, userLimit = 0) {
+  return guild.channels.create({ name, type: ChannelType.GuildVoice, parent: parentId, userLimit });
+}
+async function createCalls(guild, parentId, prefix, amount, userLimit) {
+  for (let i = 1; i <= amount; i++) {
+    const n = String(i).padStart(2, "0");
+    await createVoice(guild, `${prefix}-${n}`, parentId, userLimit);
+  }
+}
+
+async function ensureRole(guild, name, options = {}) {
+  const existing = guild.roles.cache.find(r => r.name === name);
+  if (existing) return existing;
+
+  // posição: vamos criar sem mexer em position (evita erro), depois você arrasta no Discord se quiser
+  const role = await guild.roles.create({
+    name,
+    color: options.color ?? null,
+    hoist: options.hoist ?? false,
+    mentionable: options.mentionable ?? false,
+    permissions: options.permissions ?? [],
+  });
+
+  return role;
+}
+
+async function createRolesAP(guild) {
+  const roles = {};
+
+  // 🟣 Diretoria / Administração
+  roles.diretor  = await ensureRole(guild, "Diretor",  { hoist: true, color: "#7C3AED" }); // roxo
+  roles.mediador = await ensureRole(guild, "Mediador", { hoist: true, color: "#22C55E" }); // verde
+
+  // 🔵 Mobile
+  roles.ssmob = await ensureRole(guild, "SS MOB", { hoist: true, color: "#3B82F6" }); // azul
+  // se quiser S MOB também:
+  // roles.smob  = await ensureRole(guild, "S MOB",  { hoist: true, color: "#60A5FA" }); // azul claro
+
+  // 🟠 Emulador
+  roles.ssemu = await ensureRole(guild, "SS EMU", { hoist: true, color: "#F59E0B" }); // laranja
+  // se quiser S EMU também:
+  // roles.semu  = await ensureRole(guild, "S EMU",  { hoist: true, color: "#FBBF24" }); // amarelo
+
+  // ⚪ Staff geral
+  roles.staff = await ensureRole(guild, "STAFF", { hoist: true, color: "#9CA3AF" }); // cinza
+
+  return roles;
+}
+
+
+
+async function setupApCompleto(guild) {
+    // anti-duplicar: se já existir 1v1-mob, não cria de novo
+  const jaTem = guild.channels.cache.find(c => c.name === "1v1-mob");
+  if (jaTem) throw new Error("Parece que o AP já foi criado (canal 1v1-mob já existe).");
+
+  const roles = await createRolesAP(guild); // ✅ ADICIONA ISSO AQUI
+
+  const catMobile = await createCategory(guild, "📱・MOBILE");
+  const catEmu    = await createCategory(guild, "💻・EMULADOR");
+  const catMisto  = await createCategory(guild, "📱💻・MISTO");
+
+  // ... lockCategoryForStaff ...
+  // 🔒 trava categorias só para staff
+
+
+  // MOBILE
+  const ch1v1Mob = await createText(guild, "1v1-mob", catMobile.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch1v1Mob, formato: "1v1 MOBILE" });
+
+  const ch2v2Mob = await createText(guild, "2v2-mob", catMobile.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch2v2Mob, formato: "2v2 MOBILE" });
+
+  const ch3v3Mob = await createText(guild, "3v3-mob", catMobile.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch3v3Mob, formato: "3v3 MOBILE" });
+
+  const ch4v4Mob = await createText(guild, "4v4-mob", catMobile.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch4v4Mob, formato: "4v4 MOBILE" });
+
+  // EMU
+  const ch1v1Emu = await createText(guild, "1v1-emu", catEmu.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch1v1Emu, formato: "1v1 EMULADOR" });
+
+  const ch2v2Emu = await createText(guild, "2v2-emu", catEmu.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch2v2Emu, formato: "2v2 EMULADOR" });
+
+  const ch3v3Emu = await createText(guild, "3v3-emu", catEmu.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch3v3Emu, formato: "3v3 EMULADOR" });
+
+  const ch4v4Emu = await createText(guild, "4v4-emu", catEmu.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch4v4Emu, formato: "4v4 EMULADOR" });
+
+  // MISTO
+  const ch2v2Mis = await createText(guild, "2v2-mis", catMisto.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch2v2Mis, formato: "2v2 MISTO" });
+
+  const ch3v3Mis = await createText(guild, "3v3-mis", catMisto.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch3v3Mis, formato: "3v3 MISTO" });
+
+  const ch4v4Mis = await createText(guild, "4v4-mis", catMisto.id);
+  await postarFilasPadraoNoCanal({ guildId: guild.id, channel: ch4v4Mis, formato: "4v4 MISTO" });
+
+  // CALLS
+  const catTelaEmu = await createCategory(guild, "🖥️・TELA EMU");
+  const catTelaMob = await createCategory(guild, "📱・TELA MOB");
+  await createCalls(guild, catTelaEmu.id, "call-emu", 20, 6);
+  await createCalls(guild, catTelaMob.id, "call-mob", 20, 6);
+
+  return true;
+}
+
+async function resetServidorTotal(guild) {
+  // 1️⃣ Deletar todos os canais
+  const canais = guild.channels.cache;
+
+  for (const canal of canais.values()) {
+    try {
+      await canal.delete();
+    } catch (err) {}
+  }
+
+  // 2️⃣ Deletar todos os cargos (menos @everyone)
+  const cargos = guild.roles.cache;
+
+  for (const role of cargos.values()) {
+    if (role.id === guild.id) continue; // @everyone
+    try {
+      await role.delete();
+    } catch (err) {}
+  }
+
+  // 3️⃣ Limpar banco de dados relacionado ao guild
+  await FilaAP.deleteMany({ guildId: guild.id });
+  await Partida.deleteMany({ guildId: guild.id });
+  await GuildEstado.deleteMany({ guildId: guild.id });
+  await Perfil.deleteMany({ guildId: guild.id });
+  await Pix.deleteMany({ guildId: guild.id });
+
+  filasCache.clear();
+
+  return true;
+}
+
+
+
 
 // ============================
 // READY
@@ -281,10 +484,10 @@ client.once(Events.ClientReady, async () => {
   console.log("✅ Comandos registrados (globais).");
 
   // ✅ Recarrega FILAS AP (pra botões voltarem a funcionar após restart)
-  const filasDB = await FilaAP.find({});
-  for (const f of filasDB) {
-    filasCache.set(f.messageId, { formato: f.formato, valor: String(f.valor) });
-  }
+const filasDB = await FilaAP.find({});
+for (const f of filasDB) {
+  filasCache.set(f.messageId, { formato: f.formato, valorCentavos: Number(f.valorCentavos) });
+}
   console.log(`✅ Filas AP recuperadas do DB: ${filasDB.length}`);
 
   // ✅ Recupera PARTIDAS após restart
@@ -351,7 +554,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const menu = new StringSelectMenuBuilder()
         .setCustomId("menu_painel")
         .setPlaceholder("Selecione uma opção")
-        .addOptions([{ label: "Criar Fila AP", value: "criar_fila_ap" }]);
+.addOptions([
+  { label: "Criar Fila AP", value: "criar_fila_ap" },
+  { label: "Setup AP (criar server completo)", value: "setup_ap" },
+  { label: "💀 RESET TOTAL SERVIDOR", value: "reset_total" },
+
+]);
 
       return interaction.reply({
         content: "Painel de Controle:",
@@ -379,8 +587,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!interaction.guild) return interaction.reply(eph("Esse comando só pode ser usado no servidor."));
 
       const membro = await interaction.guild.members.fetch(interaction.user.id);
-      const cargo = membro.roles.cache.find((r) => r.name === NOME_CARGO_MEDIADOR);
-      if (!cargo) return interaction.reply(eph("❌ Você não tem permissão para usar este comando."));
+const ok = membro.roles.cache.some((r) => ["Mediador", "Diretor", "STAFF"].includes(r.name));
+if (!ok) return interaction.reply(eph("❌ Você não tem permissão para usar este comando."));
 
       const filaMeds = await getFilaMediadoresDB(interaction.guildId);
 
@@ -403,32 +611,84 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // SELECT MENUS
   // ==========================
   if (interaction.isStringSelectMenu()) {
+
+
+
+
     // Painel -> criar fila
-    if (interaction.customId === "menu_painel") {
-      if (interaction.values[0] === "criar_fila_ap") {
-        const modal = new ModalBuilder().setCustomId("modal_criar_fila").setTitle("Criar Fila AP");
+if (interaction.customId === "menu_painel") {
+  const escolha = interaction.values[0];
 
-        const formatoInput = new TextInputBuilder()
-          .setCustomId("formato_input")
-          .setLabel("Formato (ex: 1v1, 2v2)")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true);
 
-        const valoresInput = new TextInputBuilder()
-          .setCustomId("valores_input")
-          .setLabel("Valores (ex: 100 50 20 10)")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true);
+  // RESET
+  if (escolha === "reset_total") {
+  if (!interaction.guild) return interaction.reply(eph("Só funciona em servidor."));
 
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(formatoInput),
-          new ActionRowBuilder().addComponents(valoresInput)
-        );
+  if (interaction.user.id !== process.env.BOT_OWNER_ID) {
+    return interaction.reply(eph("❌ Só o DONO DO BOT pode usar isso."));
+  }
 
-        return interaction.showModal(modal);
-      }
-      return;
+  const modal = new ModalBuilder()
+    .setCustomId("modal_confirm_reset_total")
+    .setTitle("⚠️ RESET TOTAL SERVIDOR");
+
+  const input = new TextInputBuilder()
+    .setCustomId("confirm_reset")
+    .setLabel('Digite "DELETAR_TUDO" para confirmar')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+
+  return interaction.showModal(modal);
+}
+
+
+  // ✅ MANUAL
+  if (escolha === "criar_fila_ap") {
+    const modal = new ModalBuilder().setCustomId("modal_criar_fila").setTitle("Criar Fila AP");
+
+    const formatoInput = new TextInputBuilder()
+      .setCustomId("formato_input")
+      .setLabel("Formato (ex: 1v1, 2v2)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const valoresInput = new TextInputBuilder()
+      .setCustomId("valores_input")
+      .setLabel("Valores (ex: 100 50 20 10 0,50)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(formatoInput),
+      new ActionRowBuilder().addComponents(valoresInput)
+    );
+
+    return interaction.showModal(modal);
+  }
+
+  // ✅ SETUP AP (dono do servidor)
+  if (escolha === "setup_ap") {
+    if (!interaction.guild) return interaction.reply(eph("Esse comando só funciona no servidor."));
+  if (interaction.user.id !== process.env.BOT_OWNER_ID) {
+      return interaction.reply(eph("❌ Só o dono do servidor pode usar o SETUP AP."));
     }
+
+    await interaction.reply(eph("⏳ Criando AP completo e postando as filas..."));
+
+    try {
+      await setupApCompleto(interaction.guild);
+      return interaction.followUp(eph("✅ SETUP AP finalizado!"));
+    } catch (err) {
+      console.error(err);
+      return interaction.followUp(eph(`❌ Erro no SETUP AP: ${err.message}`));
+    }
+  }
+
+  return interaction.reply(eph("❌ Opção inválida."));
+}
+
 
     // Menu do mediador
     if (interaction.customId === "menu_mediador") {
@@ -509,6 +769,45 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // MODALS
   // ==========================
   if (interaction.isModalSubmit()) {
+
+
+if (interaction.customId === "modal_confirm_reset_total") {
+  if (!interaction.guild) return interaction.reply(eph("Só funciona no servidor."));
+
+  if (interaction.user.id !== process.env.BOT_OWNER_ID) {
+    return interaction.reply(eph("❌ Só o DONO DO BOT pode usar isso."));
+  }
+
+  const confirm = interaction.fields
+    .getTextInputValue("confirm_reset")
+    ?.trim()
+    .toUpperCase();
+
+  if (confirm !== "DELETAR_TUDO") {
+    return interaction.reply(eph("❌ Texto incorreto. Cancelado."));
+  }
+
+  // ✅ Responde IMEDIATO (pra não expirar) e NÃO usa followUp depois
+  await interaction.reply(eph("💀 Iniciando RESET TOTAL... (o canal pode sumir e isso é normal)"));
+
+  try {
+    await resetServidorTotal(interaction.guild);
+  } catch (err) {
+    console.error(err);
+    // aqui não tenta followUp pq pode não existir canal
+  }
+
+  return;
+}
+
+
+
+
+
+
+
+
+
     // PIX (persistente)
     if (interaction.customId === "modal_pix") {
       if (!interaction.guildId) return interaction.reply(eph("Esse comando só funciona no servidor."));
@@ -530,26 +829,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .map((v) => v.trim())
         .filter(Boolean);
 
-      for (const v of listaValores) {
-        const valor = Number(v);
-        if (!Number.isFinite(valor) || valor <= 0) continue;
+for (const v of listaValores) {
+  // aceita "0,50" ou "0.50" ou "50" etc
+  const texto = v.replace(",", ".");
+  const num = Number(texto);
+  if (!Number.isFinite(num) || num <= 0) continue;
 
-        const embed = embedFilaAP({ formato, valor, jogadores: [] });
-        const msg = await interaction.channel.send({
-          embeds: [embed],
-          components: componentsFilaAP({ valor, formato }),
-        });
+  const valorCentavos = Math.round(num * 100);
 
-        await criarFilaAPDB({
-          guildId: interaction.guildId,
-          channelId: interaction.channelId,
-          messageId: msg.id,
-          formato,
-          valor,
-        });
+  const msg = await interaction.channel.send({
+    embeds: [embedFilaAP({ formato, valorCentavos, jogadores: [] })],
+    components: componentsFilaAP({ valorCentavos, formato }),
+  });
 
-        filasCache.set(msg.id, { formato, valor: String(valor) });
-      }
+  await criarFilaAPDB({
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    messageId: msg.id,
+    formato,
+    valorCentavos,
+  });
+
+  filasCache.set(msg.id, { formato, valorCentavos });
+}
 
       return interaction.editReply("✅ Filas criadas com sucesso.");
     }
@@ -604,6 +906,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ENTRAR FILA AP (normal/infinito)
     // ==========================
     if (interaction.customId.startsWith("normal_") || interaction.customId.startsWith("infinito_")) {
+
+
+
       const messageId = interaction.message.id;
 
       // tenta no cache; se não tiver (restart), busca do DB
@@ -613,7 +918,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!filaDoc) return interaction.reply(eph("⚠️ Essa fila não existe mais (ou não foi salva no banco)."));
 
       if (!filaInfo) {
-        filaInfo = { formato: filaDoc.formato, valor: String(filaDoc.valor) };
+        filaInfo = { formato: filaDoc.formato, valorCentavos: Number(filaDoc.valorCentavos) };
         filasCache.set(messageId, filaInfo);
       }
 
@@ -625,8 +930,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // atualiza embed
       await interaction.update({
-        embeds: [embedFilaAP({ formato: filaDoc.formato, valor: filaDoc.valor, jogadores: filaDoc.jogadores })],
-        components: componentsFilaAP({ valor: filaDoc.valor, formato: filaDoc.formato }),
+      embeds: [embedFilaAP({ formato: filaDoc.formato, valorCentavos: filaDoc.valorCentavos, jogadores: filaDoc.jogadores })],
+      components: componentsFilaAP({ valorCentavos: filaDoc.valorCentavos, formato: filaDoc.formato }),
       });
 
       const quantidadeNecessaria = parseInt(filaDoc.formato.split("v")[0]) * 2;
@@ -640,8 +945,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // recarrega e atualiza mensagem
           const doc2 = await getFilaAPDBByMessageId(messageId);
           await interaction.message.edit({
-            embeds: [embedFilaAP({ formato: doc2.formato, valor: doc2.valor, jogadores: doc2.jogadores })],
-            components: componentsFilaAP({ valor: doc2.valor, formato: doc2.formato }),
+embeds: [embedFilaAP({ formato: doc2.formato, valorCentavos: doc2.valorCentavos, jogadores: doc2.jogadores })],
+components: componentsFilaAP({ valorCentavos: doc2.valorCentavos, formato: doc2.formato }),
           });
 
           return interaction.followUp({ ...eph("❌ Não há mediadores disponíveis no momento.") });
@@ -649,11 +954,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const donoServidor = interaction.guild.ownerId;
 
-        const valorNumero = Number(filaDoc.valor);
-        const totalPartida = valorNumero * quantidadeNecessaria;
+        const valorCentavos = Number(filaDoc.valorCentavos);
+        const totalCentavos = valorCentavos * quantidadeNecessaria;
+        const valorNome = (valorCentavos / 100).toFixed(2).replace(".", ",");
 
         const canal = await interaction.guild.channels.create({
-          name: `ap-${valorNumero}`,
+          name: `ap-${valorNome}`,
           type: ChannelType.GuildText,
           permissionOverwrites: [
             { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
@@ -663,24 +969,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ],
         });
 
-        await salvarPartidaDB({
-          guildId: interaction.guildId,
-          channelId: canal.id,
-          jogadores: filaDoc.jogadores,
-          mediador: mediadorId,
-          valor: valorNumero,
-          total: totalPartida,
-          status: "confirmacao",
-        });
+await salvarPartidaDB({
+  guildId: interaction.guildId,
+  channelId: canal.id,
+  jogadores: filaDoc.jogadores,
+  mediador: mediadorId,
+  valorCentavos,
+  totalCentavos,
+  status: "confirmacao",
+});
+
 
         const pix = await getPixDB(interaction.guildId, mediadorId);
 
         const embedConfirmacao = new EmbedBuilder()
           .setTitle("🎮 Partida Encontrada!")
           .setDescription(
-            `👥 **Jogadores:**\n${filaDoc.jogadores.map((id) => `<@${id}>`).join("\n")}\n\n` +
+              `👥 **Jogadores:**\n${filaDoc.jogadores.map((id) => `<@${id}>`).join("\n")}\n\n` +
               `🎧 **Mediador:**\n<@${mediadorId}>\n\n` +
-              `💰 **Valor:**\nR$ ${valorNumero},00\n\n` +
+              `💰 **Valor:**\n${formatBRLFromCentavos(valorCentavos)}\n\n`+
+              `💰 **Total:**\n${formatBRLFromCentavos(totalCentavos)}\n\n`+
               `💳 **PIX do Mediador:**\n\`\`\`\n${pix || "Mediador ainda não registrou PIX"}\n\`\`\`\n\n` +
               `⚠️ Ambos jogadores devem confirmar abaixo.`
           )
@@ -702,8 +1010,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ✅ reset fila no DB e na mensagem
         const docReset = await resetJogadoresFilaAPDB(messageId);
         await interaction.message.edit({
-          embeds: [embedFilaAP({ formato: docReset.formato, valor: docReset.valor, jogadores: [] })],
-          components: componentsFilaAP({ valor: docReset.valor, formato: docReset.formato }),
+embeds: [embedFilaAP({ formato: docReset.formato, valorCentavos: docReset.valorCentavos, jogadores: [] })],
+components: componentsFilaAP({ valorCentavos: docReset.valorCentavos, formato: docReset.formato }),
         });
       }
 
@@ -724,10 +1032,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const novo = await removeJogadorFilaAPDB(messageId, interaction.user.id);
 
-      return interaction.update({
-        embeds: [embedFilaAP({ formato: novo.formato, valor: novo.valor, jogadores: novo.jogadores })],
-        components: componentsFilaAP({ valor: novo.valor, formato: novo.formato }),
-      });
+return interaction.update({
+  embeds: [embedFilaAP({ formato: novo.formato, valorCentavos: novo.valorCentavos, jogadores: novo.jogadores })],
+  components: componentsFilaAP({ valorCentavos: novo.valorCentavos, formato: novo.formato }),
+});
+
     }
 
     // ==========================
@@ -757,8 +1066,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.reply(eph("✅ Confirmação registrada."));
 
       if (upd.confirmados.length === upd.jogadores.length) {
-        await interaction.channel.setName(`pagar-${upd.total}`);
-        await interaction.channel.send(`🔥 Ambos jogadores confirmaram!\n💰 Valor total: R$ ${upd.total},00`);
+const totalTxt = (upd.total / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+await interaction.channel.setName(`pagar-${(upd.total / 100).toFixed(2).replace(".", ",")}`);
+await interaction.channel.send(`🔥 Ambos jogadores confirmaram!\n💰 Valor total: ${totalTxt}`);
 
         await Partida.updateOne({ channelId: canalId }, { $set: { status: "em_andamento" } });
 
@@ -783,8 +1093,4 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // ✅ SEMPRE token no .env
-client.login(process.env.TOKEN);
-
-
-
-
+client.login(process.env.DISCORD_TOKEN);
